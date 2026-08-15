@@ -1,7 +1,7 @@
-# dsh-mobile — DeepSeek Harness Android 壳 APK（改进版）
+# Harness mobile — DeepSeek Harness Android 壳
 
 在 Android 上跑完整的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh web agent，能真实执行 bash）。
-从零重写 [dsh-mobile-apk](https://github.com/kelai141/dsh-mobile-apk) 的改进实现：**WebView 壳 + 内嵌运行时快照（解压即跑）+ 前台保活 + 升级版看门狗 + SAF 目录桥 + 签名在线更新**。
+一个 APK 装完即用：**WebView 壳 + 内嵌运行时快照（解压即跑）+ 前台保活 + 升级版看门狗 + SAF 目录桥 + 签名在线更新**。
 
 ## 功能
 
@@ -11,19 +11,6 @@
 - **签名在线更新**：manifest 驱动快照热替换（HTTPS + ECDSA 签名 + sha256 → 原子换 usr → 自动重启）；
 - **SAF 目录桥**：`pickDirectory` 把所选目录映射为真实路径（`/storage/emulated/0/…`）；
 - **电池友好**：电池优化豁免 + 暂停引擎。
-
-## 相对原项目的改进
-
-| 项 | 原项目 | 本实现 |
-|---|---|---|
-| 快照格式 | tar.xz（三方 xz 依赖） | tar.gz（JDK GZIP + commons-compress tar，零额外压缩依赖） |
-| 快照安装 | 资产路径/下载路径两套语义 + 备份恢复 | 统一 staging 解压 + 原子换 usr + 永不覆盖 home/.dsh |
-| 看门狗 | 「引擎已运行」时直接 return 导致从不武装 | 始终武装 + 进程存活 + wedge 检测 |
-| 在线更新 | 明文 HTTP + 裸 sha256 | HTTPS + ECDSA P-256 签名 |
-| 本地 API | 仅 pick token | 追加 `DSH_ENGINE_TOKEN` 钩子 |
-| 依赖 | 未实现的 Shizuku stub | 移除 Shizuku 与未用依赖 |
-| 构建 | 缺快照即失败 | 快照外部化，可无快照编译 |
-| 工具链 | 引用的脚本缺失 | make-snapshot / gen-keys / gen-manifest / snapshot-server 全入库 |
 
 ## 架构
 
@@ -61,12 +48,12 @@ gradle assembleDebug
 
 ## 运行时快照（外部化，约 136MB 不入库）
 
-不放快照也能编译；App 首启会提示放入快照或配置更新服务器。快照由
-[原项目 Releases](https://github.com/kelai141/dsh-mobile-apk/releases) 提供（`snapshot-arm64.tar.xz`），
+不放快照也能编译；App 首启会提示放入快照或配置更新服务器。快照可从
+[dsh-mobile-apk 的 Releases](https://github.com/kelai141/dsh-mobile-apk/releases) 下载 `snapshot-arm64.tar.xz`，
 或按 `scripts/make-snapshot.sh` 在 Termux 设备自打。
 
 ```sh
-# 方式 A：用原项目现成的 arm64 快照
+# 方式 A：用现成的 arm64 快照
 #   下载 snapshot-arm64.tar.xz 后，转成 gzip tar 并改名为 snapshot.bin（AAPT2 会解压 .gz，故用 .bin 后缀）：
 python - <<'PY'
 import tarfile
