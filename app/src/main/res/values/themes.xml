@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <style name="Theme.Dsh" parent="android:Theme.Material.Light.NoActionBar">
+    <item name="android:statusBarColor">#0F1B2D</item>
+    <item name="android:navigationBarColor">#0F1B2D</item>
+    <item name="android:windowLightStatusBar">false</item>
+    <!-- IME 弹出时 WebView resize 会闪白，窗口背景改成深色避免白屏闪烁 -->
+    <item name="android:windowBackground">#0F1B2D</item>
+  </style>
+</resources>

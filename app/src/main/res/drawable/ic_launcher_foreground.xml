@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DeepSeek 风格蓝色鲸鱼（侧视，头朝左，尾在右），品牌蓝 #4D6BFE。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+  android:width="108dp"
+  android:height="108dp"
+  android:viewportWidth="108"
+  android:viewportHeight="108">
+  <!-- 鲸鱼身体 + 尾鳍 -->
+  <path
+    android:fillColor="@color/deepseek_blue"
+    android:pathData="M 24,56 C 24,47 32,40 42,40 C 52,40 63,42 71,46 C 79,40 88,36 93,34 C 86,46 82,52 80,56 C 82,59 86,64 93,69 C 86,66 79,60 71,57 C 60,66 48,70 38,68 C 28,66 24,61 24,56 Z" />
+  <!-- 眼睛（白色小圆点） -->
+  <path
+    android:fillColor="#FFFFFFFF"
+    android:pathData="M 32,49 m -3,0 a 3,3 0 1,0 6,0 a 3,3 0 1,0 -6,0 Z" />
+  <!-- 胸鳍 -->
+  <path
+    android:fillColor="@color/deepseek_blue"
+    android:pathData="M 46,60 C 46,66 42,70 38,70 C 44,68 48,64 48,60 Z" />
+</vector>

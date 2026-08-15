@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+  <!-- 可选：外部工作区需要 bash 进程直接访问用户选择的真实目录。
+       仅当用户主动走 All Files Access 授权页时才会请求；SAF 目录选择本身无需权限。 -->
+  <uses-permission
+    android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+    tools:ignore="ScopedStorage" />
+
+  <application
+    android:label="@string/app_name"
+    android:icon="@mipmap/ic_launcher"
+    android:theme="@style/Theme.Dsh"
+    android:supportsRtl="true"
+    android:usesCleartextTraffic="true">
+    <!-- usesCleartextTraffic=true 仅为本机引擎 http://127.0.0.1:3080；
+         在线更新路径在 UpdateManager 内强制 HTTPS（debug 构建才放行 http 供局域网测试）。 -->
+
+    <service
+      android:name=".EngineService"
+      android:exported="false"
+      android:foregroundServiceType="dataSync" />
+
+    <activity
+      android:name=".MainActivity"
+      android:exported="true"
+      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+      android:windowSoftInputMode="adjustResize">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>

@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# 签名与密钥（私钥绝不提交）
+*.keystore
+*.jks
+scripts/update-key.private.pem
+
+# 运行时快照（大文件，作为 Release 资产/更新服务器分发，不入库）
+app/src/main/assets/snapshot.tar.gz
+app/src/main/assets/snapshot.bin
+
+# 系统/临时
+.DS_Store
+Thumbs.db
