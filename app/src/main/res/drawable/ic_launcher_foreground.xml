@@ -1,20 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- DeepSeek 风格蓝色鲸鱼（侧视，头朝左，尾在右），品牌蓝 #4D6BFE。 -->
+<!-- 原创图标：终端提示符 "&gt;_"，象征"在手机上跑 agent / 命令 harness"。 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
   android:width="108dp"
   android:height="108dp"
   android:viewportWidth="108"
   android:viewportHeight="108">
-  <!-- 鲸鱼身体 + 尾鳍 -->
-  <path
-    android:fillColor="@color/deepseek_blue"
-    android:pathData="M 24,56 C 24,47 32,40 42,40 C 52,40 63,42 71,46 C 79,40 88,36 93,34 C 86,46 82,52 80,56 C 82,59 86,64 93,69 C 86,66 79,60 71,57 C 60,66 48,70 38,68 C 28,66 24,61 24,56 Z" />
-  <!-- 眼睛（白色小圆点） -->
+  <!-- "&gt;" 提示符（白色） -->
   <path
     android:fillColor="#FFFFFFFF"
-    android:pathData="M 32,49 m -3,0 a 3,3 0 1,0 6,0 a 3,3 0 1,0 -6,0 Z" />
-  <!-- 胸鳍 -->
+    android:pathData="M 31,40 L 47,54 L 31,68 L 39,68 L 53,54 L 39,40 Z" />
+  <!-- "_" 光标（浅蓝） -->
   <path
-    android:fillColor="@color/deepseek_blue"
-    android:pathData="M 46,60 C 46,66 42,70 38,70 C 44,68 48,64 48,60 Z" />
+    android:fillColor="#FF7CD6FF"
+    android:pathData="M 59,66 L 77,66 L 77,71 L 59,71 Z" />
 </vector>

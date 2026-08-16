@@ -16,6 +16,9 @@ scripts/update-key.private.pem
 app/src/main/assets/snapshot.tar.gz
 app/src/main/assets/snapshot.bin
 
+# CI 工作流暂不入库（推送 .github/workflows 需要 PAT 的 workflow scope，待补后再 force-add）
+.github/workflows/
+
 # 系统/临时
 .DS_Store
 Thumbs.db
