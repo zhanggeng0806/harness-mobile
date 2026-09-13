@@ -10,6 +10,12 @@ object RuntimeConfig {
   const val ENGINE_URL = "http://127.0.0.1:3080"
   const val ENGINE_PORT = 3080
 
+  /**
+   * 引擎 stdout/stderr 重定向文件（相对 filesDir）。每次启动由 ProcessBuilder
+   * 截断，内容即本次进程的输出——dsh web 的一次性 launch token 只在这里出现。
+   */
+  const val ENGINE_LOG = "engine.log"
+
   /** 快照解压后的根目录（相对 filesDir）。 */
   const val USR_DIR = "usr"
   const val HOME_DIR = "home"

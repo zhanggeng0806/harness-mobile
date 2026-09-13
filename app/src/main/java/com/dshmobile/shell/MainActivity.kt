@@ -21,6 +21,7 @@ import android.webkit.JsResult
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -160,6 +161,16 @@ class MainActivity : ComponentActivity() {
         if (isEngineSource(failingUrl)) showGuide()
       }
 
+      override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+        // dsh web 自带浏览器鉴权：首访不带 launch token（或 token 随引擎重启轮换）
+        // 会拿到 401。用当前 token 重试一次——地址与失败请求相同说明 token 本身
+        // 也已失效，此时交给 Cookie 兜底，不再重试（避免自触发死循环）。
+        if (errorResponse.statusCode == 401 && isEngineSource(request.url.toString())) {
+          val entry = engineManager.webEntryUrl()
+          if (entry != request.url.toString()) view.loadUrl(entry)
+        }
+      }
+
       override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
         pushSystemDark(view)
@@ -197,7 +208,7 @@ class MainActivity : ComponentActivity() {
       ),
       "androidBridge",
     )
-    webView.loadUrl(RuntimeConfig.ENGINE_URL)
+    webView.loadUrl(engineManager.webEntryUrl())
   }
 
   /** SAF 目录选择（带 All Files Access 引导）：外部工作区要求 bash 能直接访问真实路径。 */
@@ -264,6 +275,9 @@ class MainActivity : ComponentActivity() {
         c.connectTimeout = 15_000
         c.readTimeout = 60_000
         c.requestMethod = "GET"
+        // dsh 的 /api 只认浏览器会话 Cookie（?token= 仅用于换取 Cookie），而原生
+        // HttpURLConnection 不在 WebView 的 Cookie 罐里，必须自己带上。
+        engineManager.engineCookie()?.let { c.setRequestProperty("Cookie", it) }
         if (c.responseCode != HttpURLConnection.HTTP_OK) throw java.io.IOException("HTTP " + c.responseCode)
         var saved: String? = null
         c.inputStream.use { input -> saved = saveExportToDshData(filename, input) }
@@ -397,6 +411,14 @@ class MainActivity : ComponentActivity() {
   /**
    * 注入移动端 CSS 加固：修复窄屏上长文本/代码块/表格/图片溢出导致「字显示不全」。
    * 用固定 id 幂等注入，SPA 路由切换后仍生效（style 元素常驻 document）。
+   *
+   * 选择器会随 dsh 前端版本漂移：CSS module 的哈希前缀由组件路径派生，所以
+   * 组件没重构就跨版本保留（T1PP_q 设置行、oY77xG 权限行、_8_XoUG 反馈区、
+   * wSkVaW 会话容器），组件被重构则整组失效。下面只保留在 dsh 0.1.5-rc.1 上
+   * 实测仍命中的规则：旧版针对消息操作行（osXY9a_actions / p-xYUq_*）与模型
+   * 菜单（_7KE1Ra_menu）的修补已删除——新版操作行改叫 xzv4MW_action、统计改叫
+   * bOPqQW_pill，且模型菜单自带内联居中定位，原规则不再命中，强留还会与新版的
+   * 定位逻辑打架。
    */
   private fun injectMobileCss(view: WebView) {
     val css =
@@ -409,16 +431,9 @@ class MainActivity : ComponentActivity() {
         // 窄屏下描述列占满整行，控件换到下一行，避免描述被挤成很多行。
         ".T1PP_q_row,.oY77xG_row,._5QVD0a_row{flex-wrap:wrap!important}" +
         ".T1PP_q_rowText,.oY77xG_rowText,._5QVD0a_rowText{flex-basis:100%!important;padding-right:0!important}" +
-        // 模型选择菜单：默认 right:0 右对齐导致靠右截断，改为居中于触发按钮。
-        "._7KE1Ra_menu{right:auto!important;left:50%!important;transform:translateX(-50%)!important}" +
         // 全局间距自适应：窄屏收窄两侧留白，给内容更多可用宽度。
         ".wSkVaW_root{--dsh-composer-side-clearance:8px!important}" +
-        // 消息底部操作行：按钮行 + 统计文字行，均右对齐（统计文字独占一行）。
-        ".p-xYUq_runTimeDot{margin:0!important}" +
-        ".p-xYUq_timeEnd,.p-xYUq_timeStart{padding:0!important;font-size:13px!important}" +
-        ".osXY9a_actions{justify-content:flex-end!important;flex-wrap:wrap!important;height:auto!important}" +
-        ".osXY9a_actions .p-xYUq_timeEnd,.osXY9a_actions .p-xYUq_timeStart{flex-basis:100%!important;text-align:right!important}" +
-        // 反馈补充说明编辑器（输入框+保存+取消）：输入框固定 260px 会溢出截断，改为自适应。
+        // 反馈补充说明编辑器（输入框+保存+取消）：输入框固定宽会溢出截断，改为自适应。
         "._8_XoUG_noteEditor{max-width:100%!important;width:100%!important}" +
         "._8_XoUG_noteInput{width:auto!important;flex:1!important;min-width:0!important}}"
     try {
@@ -433,9 +448,17 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
-   * 注入移动端 JS 修补：只隐藏侧边栏开关的 tooltip（「打开/收起侧边栏」，
-   * 其锚点在关闭的抽屉里导致气泡卡在左上角），保留其它 tooltip（如统计详情）。
-   * 用 MutationObserver 按文字精确匹配，避免误伤。
+   * 注入移动端 JS 修补：
+   *  1. 只隐藏侧边栏开关的 tooltip（「打开/收起侧边栏」，其锚点在关闭的抽屉里
+   *     导致气泡卡在左上角），保留其它 tooltip（如统计详情）。用 MutationObserver
+   *     按文字精确匹配，避免误伤。
+   *  2. 阻止会话切换/新建会话时自动聚焦底部输入框而弹出键盘。
+   *
+   * 第 2 点随 dsh 前端改版换了靶子：0.1.0 的 composer 是 `<textarea>`，0.1.5 换成
+   * Lexical 驱动的 `contenteditable` div（`[data-composer-input]`），所以补丁落在
+   * `HTMLDivElement.prototype.focus` 上。判据与原版一致：只有「用户刚用手指点过
+   * 输入框」（pointerdown 记录时间）才放行程序化 focus；会话切换、新建会话这类
+   * 自动聚焦一律吞掉。原生点击本身不走 .focus()，用户手点输入框照常弹键盘。
    */
   private fun injectMobileJs(view: WebView) {
     val js =
@@ -447,20 +470,14 @@ class MainActivity : ComponentActivity() {
         "});};" +
         "new MutationObserver(hide).observe(document.body,{childList:true,subtree:true});" +
         "hide();" +
-        // 会话切换/新建会话会触发 composer 组件的 useEffect 调用 el.focus({preventScroll:true})
-        // 自动聚焦底部输入框从而弹出键盘。monkey-patch HTMLTextAreaElement.focus：只忽略
-        // 带 preventScroll 且发生在非用户点击时刻的 composer 自动聚焦；用户主动点击 composer
-        // （pointerdown 记录时间）时放行，从源头阻止，不产生 IME 显隐闪烁。
         "var lastComposerTap=0;" +
         "document.addEventListener('pointerdown',function(e){" +
-        "var c=e.target&&e.target.closest?e.target.closest('[data-composer-card] textarea'):null;" +
+        "var c=e.target&&e.target.closest?e.target.closest('[data-composer-input]'):null;" +
         "if(c){lastComposerTap=Date.now();}" +
         "},true);" +
-        "var origFocus=HTMLTextAreaElement.prototype.focus;" +
-        "HTMLTextAreaElement.prototype.focus=function(opts){" +
-        "if(opts&&opts.preventScroll&&this.closest&&this.closest('[data-composer-card]')){" +
-        "if(Date.now()-lastComposerTap>150){return;}" +
-        "}" +
+        "var origFocus=HTMLDivElement.prototype.focus;" +
+        "HTMLDivElement.prototype.focus=function(){" +
+        "if(this.matches&&this.matches('[data-composer-input]')&&Date.now()-lastComposerTap>150){return;}" +
         "return origFocus.apply(this,arguments);" +
         "};" +
         "})()"
@@ -643,6 +660,9 @@ class MainActivity : ComponentActivity() {
         val deadline = System.currentTimeMillis() + RuntimeConfig.BOOT_TIMEOUT_SEC * 1000
         while (System.currentTimeMillis() < deadline) {
           if (EngineProbe.isRunning()) {
+            // 等 dsh web 打印本次启动的 launch token：首帧必须带 token 才能换取
+            // 会话 Cookie，否则页面只会拿到 401。
+            engineManager.awaitLaunchToken(8_000)
             startEngineService()
             runOnUiThread { showWeb() }
             return@Thread
@@ -700,7 +720,9 @@ class MainActivity : ComponentActivity() {
   private fun showWeb() {
     guideView.visibility = View.GONE
     webView.visibility = View.VISIBLE
-    webView.reload()
+    // 每次显示都走带 launch token 的入口：token 换 Cookie 是幂等的（拿到
+    // 新签名 Cookie 后 303 回干净 URL），比裸 reload 更能自愈 401。
+    webView.loadUrl(engineManager.webEntryUrl())
   }
 
   private fun showGuide() {

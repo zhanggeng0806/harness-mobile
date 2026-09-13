@@ -6,6 +6,8 @@ import android.util.Log
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * 内嵌运行时（Termux 风格 rootfs 快照）的所有权者：
@@ -148,13 +150,15 @@ class EngineManager(
   private fun copyIfMissing(src: File, dst: File) {
     val srcPath = src.toPath()
     if (java.nio.file.Files.isSymbolicLink(srcPath)) {
-      if (!java.nio.file.Files.exists(dst.toPath())) {
-        dst.parentFile?.mkdirs()
-        java.nio.file.Files.createSymbolicLink(
-          dst.toPath(),
-          java.nio.file.Files.readSymbolicLink(srcPath),
-        )
-      }
+      // 符号链接必须「删了再建」（幂等）：悬空链接下 Files.exists() 返回 false，
+      // 但链接文件本身已存在（例如前一步 copyTree 刚建过），直接 create 会抛
+      // FileAlreadyExistsException。
+      dst.parentFile?.mkdirs()
+      java.nio.file.Files.deleteIfExists(dst.toPath())
+      java.nio.file.Files.createSymbolicLink(
+        dst.toPath(),
+        java.nio.file.Files.readSymbolicLink(srcPath),
+      )
       return
     }
     if (src.isDirectory) {
@@ -207,6 +211,94 @@ class EngineManager(
     return privateDsh
   }
 
+  // ---------------------------------------------------------------------------
+  // dsh web 浏览器鉴权（launch token → 会话 Cookie）
+  // ---------------------------------------------------------------------------
+
+  /** 引擎日志文件（进程输出重定向目标）。 */
+  fun engineLogFile(): File = File(context.filesDir, RuntimeConfig.ENGINE_LOG)
+
+  /**
+   * 解析本次 dsh web 打印的一次性 launch token。
+   *
+   * dsh web 自带浏览器鉴权：启动时打印 `dsh web: http://127.0.0.1:3080/?token=…`，
+   * 用该地址 GET 一次会种下 30 天签名的 HttpOnly Cookie 并 303 到 `/`。token 是
+   * 进程级随机值（源码里是 PROCESS_LAUNCH_TOKENS WeakMap，无 flag/env 可覆盖），
+   * 所以只能从日志里取。
+   *
+   * 取最后一条：日志每次启动被截断，正常只有一条；防御性地容忍残留。
+   */
+  fun launchToken(): String? {
+    val text = try {
+      val f = engineLogFile()
+      if (!f.exists()) return null
+      f.readText()
+    } catch (_: Throwable) {
+      return null
+    }
+    return TOKEN_PATTERN.findAll(text).lastOrNull()?.groupValues?.get(1)
+  }
+
+  /**
+   * 有界等待 launch token（冷启动 20-45s，token 在 Web 服务就绪时才打印）。
+   * 只在后台线程调用。
+   */
+  fun awaitLaunchToken(timeoutMs: Long): String? {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (true) {
+      launchToken()?.let { return it }
+      if (System.currentTimeMillis() >= deadline) return null
+      try {
+        Thread.sleep(200)
+      } catch (_: InterruptedException) {
+        return null
+      }
+    }
+  }
+
+  /**
+   * WebView 入口地址：优先带 launch token——首帧必须由它换取会话 Cookie。
+   *
+   * 取不到 token 时退回干净 URL：旧版 dsh 无鉴权本就该这样；新版则依赖
+   * Cookie 罐里已有的会话（token 每次进程启动都轮换，但 Cookie 的签名密钥
+   * 持久化在 credentials 里，30 天内跨重启仍然有效）。
+   */
+  fun webEntryUrl(): String {
+    val token = launchToken() ?: return RuntimeConfig.ENGINE_URL
+    return RuntimeConfig.ENGINE_URL + "/?token=" + token
+  }
+
+  /**
+   * 用 launch token 走一次原生握手，换回 dsh 的会话 Cookie。
+   *
+   * 原生 HTTP 通道（会话导出等 `/api` 请求）没有 WebView 的 Cookie 罐，而
+   * dsh 的 `/api` 走 requestRejection、只认 Cookie（不认 `?token=`），所以必须
+   * 先换 Cookie 再手动带上。旧版 dsh（无 token）返回 null，调用方按无鉴权处理。
+   *
+   * 注意不要跟随 303：Cookie 只在跳转响应的 Set-Cookie 上，跟随后拿不到。
+   */
+  fun engineCookie(force: Boolean = false): String? {
+    if (!force) cachedCookie?.let { return it }
+    val token = launchToken() ?: return null
+    return try {
+      val conn = URL(RuntimeConfig.ENGINE_URL + "/?token=" + token).openConnection() as HttpURLConnection
+      conn.instanceFollowRedirects = false
+      conn.connectTimeout = 3_000
+      conn.readTimeout = 3_000
+      conn.requestMethod = "GET"
+      val code = conn.responseCode
+      val setCookie = conn.headerFields.entries
+        .firstOrNull { it.key?.equals("Set-Cookie", ignoreCase = true) == true }
+        ?.value?.firstOrNull()
+      conn.disconnect()
+      if (code != HTTP_SEE_OTHER || setCookie.isNullOrBlank()) null
+      else setCookie.substringBefore(';').also { cachedCookie = it }
+    } catch (t: Throwable) {
+      Log.w(TAG, "launch token exchange failed", t)
+      null
+    }
+  }
+
   /**
    * 启动 dsh web 引擎（内嵌快照）。进程级 CAS + 冷却窗口防双启动。
    * @return true 表示引擎进程已启动（或已在启动中）。
@@ -228,7 +320,10 @@ class EngineManager(
     return try {
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath,
-        "web", "--port", port.toString(),
+        // --no-open：dsh web 默认会拉起系统默认浏览器（Android 上必然失败，
+        // 还会多 fork 一个 node 打开器并打印一条无害但误导的错误）。壳自己
+        // 用 WebView 承载界面，直接关掉这个 handoff。
+        "web", "--port", port.toString(), "--no-open",
       )
       val env = mapOf(
         "PATH" to (usrDir.absolutePath + "/bin:/system/bin"),
@@ -250,6 +345,8 @@ class EngineManager(
       val proc = startWithArgs(args, env)
       engineProcess = proc
       lastStartAttemptAt = now
+      // 新进程 = 新 launch token：丢掉上一轮的 Cookie 缓存，强制重新换取。
+      cachedCookie = null
       true
     } catch (t: Throwable) {
       Log.e(TAG, "engine start failed", t)
@@ -264,7 +361,7 @@ class EngineManager(
    * /system/bin/linker64 加载（等同 JNI 库加载机制，app-data 始终允许）。
    */
   private fun startWithArgs(args: Array<String>, env: Map<String, String>): Process {
-    val log = File(context.filesDir, "engine.log")
+    val log = engineLogFile()
     fun build(argv: List<String>): ProcessBuilder =
       ProcessBuilder(argv).also { b ->
         b.environment().putAll(env)
@@ -308,5 +405,15 @@ class EngineManager(
     /** 引擎 node 进程（companion 级，跨实例共享，看门狗据此判活）。 */
     @Volatile
     var engineProcess: Process? = null
+
+    /** dsh 会话 Cookie 缓存（companion 级：Activity 与 Service 各自 new EngineManager）。 */
+    @Volatile
+    var cachedCookie: String? = null
+
+    /** dsh web 启动行里的 launch token（`http://127.0.0.1:<port>/?token=<b64url>`）。 */
+    private val TOKEN_PATTERN = Regex("""127\.0\.0\.1:\d+/\?token=([A-Za-z0-9_-]+)""")
+
+    /** 换 Cookie 成功的响应码（dsh 用 303 See Other 跳回干净 URL）。 */
+    private const val HTTP_SEE_OTHER = 303
   }
 }
