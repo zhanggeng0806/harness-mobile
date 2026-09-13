@@ -31,6 +31,9 @@ class EngineService : Service() {
   private var watchdog: ScheduledExecutorService? = null
   private var unresponsiveTicks = 0
 
+  /** 引擎启动线程：启动前可能要先做一次性的快照路径重定向（遍历整个 usr/ 树）。 */
+  private val bootstrap = Executors.newSingleThreadExecutor()
+
   override fun onCreate() {
     super.onCreate()
     engineManager = EngineManager(this)
@@ -44,9 +47,11 @@ class EngineService : Service() {
       return START_NOT_STICKY
     }
     if (engineManager.engineReady) {
-      // 幂等启动：引擎已在跑则 CAS + 冷却窗口兜底，不会双启。
-      engineManager.startEngine()
+      // 看门狗在主线程武装（轻量），引擎启动放后台：启动前可能要先做一次性的
+      // 快照路径重定向（遍历整个 usr/ 树），压在主线程会 ANR。
+      // 双启动仍由 EngineManager 的 CAS + 冷却窗口兜底（重定向期间 STARTING 为真）。
       armWatchdog()
+      bootstrap.execute { engineManager.startEngine() }
     }
     return START_STICKY
   }
@@ -56,6 +61,7 @@ class EngineService : Service() {
   override fun onDestroy() {
     watchdog?.shutdownNow()
     watchdog = null
+    bootstrap.shutdownNow()
     super.onDestroy()
   }
 

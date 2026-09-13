@@ -125,6 +125,9 @@ class EngineManager(
         }
         copyIfMissing(stageHome, homeDir)
       }
+      // 新快照又带着「它自己宿主 App 的包名」回来，作废重定向标记，
+      // 让下一次启动引擎前重新改写成本 App 的路径。
+      retargetMarker().delete()
 
       stage.deleteRecursively()
       old.deleteRecursively()
@@ -299,6 +302,173 @@ class EngineManager(
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // 快照宿主包名重定向
+  // ---------------------------------------------------------------------------
+
+  /**
+   * 重定向标记：<filesDir>/.runtime-retarget-v<rev>-<ownPkg>。
+   * 带逻辑版本号——升级判定规则后老标记自动失效，会重跑一遍。
+   */
+  private fun retargetMarker(): File =
+    File(context.filesDir, ".runtime-retarget-v" + RETARGET_REVISION + "-" + context.packageName)
+
+  /**
+   * 把快照里「按快照宿主 App 包名写死」的路径改写成本 App 的实际值。
+   *
+   * 快照是在某个具体 App 的数据目录里做出来的，所以路径被烘进了很多地方：
+   *  - `home/.dsh/profiles/<profile>/cordis.patch.yml` → shell-termux 的 bashPath/prefix/home…
+   *  - `home/.dsh/profiles/<profile>/node_modules/@dsh-android/…` → IME 包名、shared_prefs、DSH_HOME 兜底
+   *  - `usr/bin/…` → 脚本 shebang（#!/data/user/0/&lt;宿主包名&gt;/files/usr/bin/bash）
+   *  - `usr/lib/…` → libtool .la、Makefile、ruby/perl/python 元数据
+   *
+   * v0.1.0 用的快照恰好构建于 `com.dshmobile.shell`，与本 App 同名；v0.2.x 换成
+   * 上游 v0.14.0-preview 快照后，其宿主包名是 `com.dsharnessmobile.shell` ——
+   * 本机并不存在该目录，于是 shell-termux 的 `accessSync(bashPath, X_OK)` 失败，
+   * **所有 bash 能力直接不可用**；usr/bin 里 186 个脚本的 shebang 也一并失效。
+   *
+   * 幂等且只需跑一次（标记文件兜底）。二进制按「文件头魔数 + NUL 密度（带文本
+   * 扩展名豁免）」判定后跳过，不碰 ELF/.so/.node/字体/图片。
+   *
+   * @param force 忽略标记强制重跑。
+   * @return 实际改写的文件数；0 表示无需改写或此前已完成。
+   */
+  fun retargetRuntimePaths(force: Boolean = false): Int {
+    val marker = retargetMarker()
+    if (!force && marker.exists()) return 0
+    val own = context.packageName
+    val replacements = FOREIGN_HOST_PACKAGES.map { it to own } +
+      // 顺带把 /data/data/<pkg>/files 归一化到本机真实路径
+      // （/data/data 是 /data/user/0 的绑定挂载，但这种写法在部分系统上不可靠）。
+      listOf("/data/data/$own/files" to context.filesDir.absolutePath)
+    val probes = FOREIGN_HOST_PACKAGES.map { it.toByteArray(Charsets.US_ASCII) }
+
+    var changed = 0
+    var occurrences = 0
+    try {
+      for (root in listOf(usrDir, File(homeDir, ".dsh/profiles"))) {
+        if (!root.isDirectory) continue
+        // Files.walk 默认不跟随符号链接：node_modules 里既有悬空链接（指向
+        // /data/data/com.termux/...），也有指向 .pnpm 的链接，跟随会重复遍历
+        // 甚至成环；不跟随也能覆盖 .pnpm 实体目录。
+        java.nio.file.Files.walk(root.toPath()).use { stream ->
+          val iterator = stream.iterator()
+          while (iterator.hasNext()) {
+            val path = iterator.next()
+            if (!java.nio.file.Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) continue
+            val count = rewriteIfStale(path.toFile(), replacements, probes) ?: continue
+            changed++
+            occurrences += count
+          }
+        }
+      }
+      marker.parentFile?.mkdirs()
+      marker.writeText("ok\n")
+      Log.i(TAG, "runtime paths retargeted: $changed files, $occurrences occurrences")
+    } catch (t: Throwable) {
+      Log.e(TAG, "runtime path retarget failed", t)
+    }
+    return changed
+  }
+
+  /**
+   * 命中旧包名则改写并返回替换次数，否则返回 null（未改动）。
+   * 先做字节级预筛，避免为绝大多数无命中的文件付出 UTF-8 解码与分配成本。
+   */
+  private fun rewriteIfStale(
+    file: File,
+    replacements: List<Pair<String, String>>,
+    probes: List<ByteArray>,
+  ): Int? {
+    val length = file.length()
+    if (length <= 0L || length > MAX_RETARGET_FILE_BYTES) return null
+    val bytes = try {
+      file.readBytes()
+    } catch (_: Throwable) {
+      return null
+    }
+    if (probes.none { bytes.containsAscii(it) }) return null
+    if (looksBinary(bytes, file.name)) return null
+
+    var text = String(bytes, Charsets.UTF_8)
+    var total = 0
+    for ((from, to) in replacements) {
+      val count = text.split(from).size - 1
+      if (count > 0) {
+        text = text.replace(from, to)
+        total += count
+      }
+    }
+    if (total == 0) return null
+    return try {
+      file.writeBytes(text.toByteArray(Charsets.UTF_8))
+      total
+    } catch (_: Throwable) {
+      null
+    }
+  }
+
+  /** 字节序列包含判定（needle 均为 ASCII，可安全按字节比较）。 */
+  private fun ByteArray.containsAscii(needle: ByteArray): Boolean {
+    if (needle.isEmpty() || size < needle.size) return false
+    val first = needle[0]
+    outer@ for (i in 0..size - needle.size) {
+      if (this[i] != first) continue
+      for (j in 1 until needle.size) if (this[i + j] != needle[j]) continue@outer
+      return true
+    }
+    return false
+  }
+
+  /**
+   * 二进制判定：改写二进制会把长度不同的替换写坏（后面所有字节都要平移）。
+   *
+   * 只看「前 8KB 有没有 NUL」是不够的——`@dsh-android/dsh-android-manage/lib/index.js`
+   * 内嵌了 NUL 字节但确实是文本，会被误判跳过。所以：
+   *  1. 先看文件头魔数（ELF/PE/gzip/xz/zip/png/字体/静态库…）→ 直接判二进制；
+   *  2. 再看 NUL，但带文本扩展名的文件豁免。
+   */
+  private fun looksBinary(bytes: ByteArray, name: String): Boolean {
+    if (startsWithAny(bytes, BINARY_MAGICS)) return true
+    val probeLength = minOf(bytes.size, BINARY_PROBE_BYTES)
+    var hasNul = false
+    for (i in 0 until probeLength) {
+      if (bytes[i] == 0.toByte()) {
+        hasNul = true
+        break
+      }
+    }
+    return hasNul && !isTextExtension(name)
+  }
+
+  private fun startsWithAny(bytes: ByteArray, prefixes: List<ByteArray>): Boolean {
+    for (prefix in prefixes) {
+      if (bytes.size < prefix.size) continue
+      var same = true
+      for (i in prefix.indices) {
+        if (bytes[i] != prefix[i]) {
+          same = false
+          break
+        }
+      }
+      if (same) return true
+    }
+    return false
+  }
+
+  /** 取扩展名（跳过 .revbak/.bak/.orig 之类备份后缀）判断是否为文本类。 */
+  private fun isTextExtension(name: String): Boolean {
+    var core = name.lowercase()
+    for (suffix in BACKUP_SUFFIXES) {
+      if (core.endsWith(suffix)) {
+        core = core.dropLast(suffix.length)
+        break
+      }
+    }
+    val ext = core.substringAfterLast('.', "")
+    return ext.isNotEmpty() && ext in TEXT_EXTENSIONS
+  }
+
   /**
    * 启动 dsh web 引擎（内嵌快照）。进程级 CAS + 冷却窗口防双启动。
    * @return true 表示引擎进程已启动（或已在启动中）。
@@ -318,6 +488,10 @@ class EngineManager(
       return true
     }
     return try {
+      // 必须在引擎读配置前完成：快照里的宿主包名路径不改写，shell-termux 的
+      // bashPath 就指向不存在的目录，bash 全线不可用。幂等（标记兜底），
+      // 且此刻持有 STARTING，不会被并发的看门狗重入。
+      retargetRuntimePaths()
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath,
         // --no-open：dsh web 默认会拉起系统默认浏览器（Android 上必然失败，
@@ -415,5 +589,64 @@ class EngineManager(
 
     /** 换 Cookie 成功的响应码（dsh 用 303 See Other 跳回干净 URL）。 */
     private const val HTTP_SEE_OTHER = 303
+
+    /**
+     * 快照宿主 App 的包名——快照按这些包名把数据目录烘进了配置、插件与脚本。
+     * 本 App 的包名不同，必须重定向（见 retargetRuntimePaths）。
+     * 已知来源：上游 kelai141/dsh-mobile-apk 的 v0.14.0-preview 快照。
+     */
+    private val FOREIGN_HOST_PACKAGES = listOf("com.dsharnessmobile.shell")
+
+    /** 重定向时单个文件的大小上限：超过即认为是二进制/大资源，直接跳过。 */
+    private const val MAX_RETARGET_FILE_BYTES = 10L * 1024 * 1024
+
+    /** 二进制探测窗口：前 8KB 出现 NUL 即判定为二进制。 */
+    private const val BINARY_PROBE_BYTES = 8192
+
+    /**
+     * 重定向逻辑版本。改判定规则时必须递增：标记文件带版本号，老标记不会
+     * 让新逻辑被跳过（升级 App 后仍会重跑一遍）。
+     */
+    private const val RETARGET_REVISION = 2
+
+    /** 常见二进制文件头。 */
+    private val BINARY_MAGICS: List<ByteArray> = listOf(
+      byteArrayOf(0x7F, 0x45, 0x4C, 0x46), // ELF（含 .so / .node / 可执行）
+      byteArrayOf(0x4D, 0x5A), // PE / EXE
+      byteArrayOf(0x1F, 0x8B.toByte()), // gzip
+      byteArrayOf(0xFD.toByte(), 0x37, 0x7A, 0x58, 0x5A, 0x00), // xz
+      byteArrayOf(0x42, 0x5A, 0x68), // bzip2
+      byteArrayOf(0x28, 0xB5.toByte(), 0x2F, 0xFD.toByte()), // zstd
+      byteArrayOf(0x50, 0x4B, 0x03, 0x04), // zip / apk / jar
+      byteArrayOf(0x37, 0x7A, 0xBC.toByte(), 0xAF.toByte()), // 7z
+      byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47), // png
+      byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte()), // jpeg
+      byteArrayOf(0x47, 0x49, 0x46, 0x38), // gif
+      byteArrayOf(0x52, 0x49, 0x46, 0x46), // riff（webp/wav/avi）
+      byteArrayOf(0x25, 0x50, 0x44, 0x46), // pdf
+      byteArrayOf(0x00, 0x61, 0x73, 0x6D), // wasm
+      byteArrayOf(0x00, 0x01, 0x00, 0x00), // ttf
+      byteArrayOf(0x4F, 0x54, 0x54, 0x4F), // otf
+      byteArrayOf(0x77, 0x4F, 0x46, 0x32), // woff2
+      byteArrayOf(0x77, 0x4F, 0x46, 0x46), // woff
+      "!<arch>".toByteArray(Charsets.US_ASCII), // ar 静态库
+    )
+
+    /** 备份后缀：判扩展名前先剥掉。 */
+    private val BACKUP_SUFFIXES = listOf(".revbak", ".bak", ".orig", ".tmp", ".save")
+
+    /** 文本类扩展名（含 NUL 也仍然按文本处理）。 */
+    private val TEXT_EXTENSIONS = setOf(
+      "js", "mjs", "cjs", "jsx", "ts", "tsx", "json", "json5", "map", "lock",
+      "yml", "yaml", "toml", "ini", "cfg", "conf", "properties", "env", "list", "mod", "sum",
+      "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
+      "py", "rb", "pl", "pm", "php", "lua", "tcl", "awk", "sed", "r",
+      "txt", "md", "markdown", "rst", "log", "csv", "tsv",
+      "html", "htm", "xml", "svg", "css", "scss", "less", "vue",
+      "la", "pc", "inc", "cmake", "ac", "m4", "h", "c", "cc", "cpp", "hpp",
+      "java", "kt", "gradle", "patch", "diff", "tmpl", "tpl", "template",
+      "service", "desktop", "rule", "spec", "proto", "sql", "gql", "thrift", "idl",
+      "sample", "example", "dist", "in",
+    )
   }
 }
