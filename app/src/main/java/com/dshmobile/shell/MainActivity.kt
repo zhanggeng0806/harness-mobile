@@ -629,6 +629,10 @@ class MainActivity : ComponentActivity() {
     Thread {
       try {
         if (EngineProbe.isRunning()) {
+          // 引擎已在跑：也要确认 launch token 已落盘。dsh 的 announceReady 等
+          // loader settle，端口先监听、URL 后打印之间存在窗口；在窗口内直接加载
+          // 裸 URL 会停在 401 页。这里做有界等待把窗口关掉。
+          if (engineManager.launchToken() == null) engineManager.awaitLaunchToken(5_000)
           runOnUiThread { showWeb() }
           return@Thread
         }
