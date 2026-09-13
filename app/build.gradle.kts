@@ -14,8 +14,8 @@ android {
     // app-data 里的 ELF（内嵌引擎/bash/子命令都会命中）；保持 34 让直连
     // exec 在 Android 15/16 上仍然可用，必要时再叠加 linker64 回退。
     targetSdk = 34
-    versionCode = 4
-    versionName = "0.2.2"
+    versionCode = 5
+    versionName = "0.2.3"
   }
 
   // 本机 ~/.android 在沙箱内不可写，debug 签名密钥库固定放工程内。

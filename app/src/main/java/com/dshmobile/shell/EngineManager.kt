@@ -335,7 +335,11 @@ class EngineManager(
    */
   fun retargetRuntimePaths(force: Boolean = false): Int {
     val marker = retargetMarker()
-    if (!force && marker.exists()) return 0
+    // 只认标记文件是不够的：dsh 的「撤销/恢复」会把历史 profile 配置写回来，
+    // 而那些历史快照里带着外来宿主包名——恢复一次就永久失去 bash。所以标记
+    // 存在时也复查运行时会真正读取的 profile 配置（每份几 KB，几乎零成本），
+    // 一旦发现残留就整体重跑，实现自愈。
+    if (!force && marker.exists() && !profileConfigStale()) return 0
     val own = context.packageName
     val replacements = FOREIGN_HOST_PACKAGES.map { it to own } +
       // 顺带把 /data/data/<pkg>/files 归一化到本机真实路径
@@ -369,6 +373,27 @@ class EngineManager(
       Log.e(TAG, "runtime path retarget failed", t)
     }
     return changed
+  }
+
+  /**
+   * 运行时会真正读取的 profile 配置（每个 profile 目录下的 cordis.patch.yml）
+   * 里是否还残留外来宿主包名。用于「撤销历史快照后自愈」的廉价复查。
+   */
+  private fun profileConfigStale(): Boolean {
+    val profiles = File(homeDir, ".dsh/profiles")
+    val dirs = profiles.listFiles() ?: return false
+    for (dir in dirs) {
+      if (!dir.isDirectory) continue
+      val config = File(dir, "cordis.patch.yml")
+      if (!config.isFile) continue
+      val text = try {
+        config.readText()
+      } catch (_: Throwable) {
+        continue
+      }
+      if (FOREIGN_HOST_PACKAGES.any { text.contains(it) }) return true
+    }
+    return false
   }
 
   /**
