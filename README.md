@@ -2,7 +2,7 @@
 
 在 Android 上运行完整的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh web agent，能真实执行 bash）。
 
-一个 APK 装完即用：WebView 壳 + 内嵌运行时快照（解压即跑）+ 前台保活看门狗 + SAF 目录桥 + 签名在线更新。
+一个 APK 装完即用：WebView 壳 + 内嵌运行时快照（解压即跑）+ 前台保活看门狗 + SAF 目录桥 + 签名在线更新。内置运行时为 dsh 0.1.5-rc.1（arm64）。
 
 ## 构建
 
@@ -13,7 +13,7 @@ bash scripts/gen-debug-keystore.sh
 gradle assembleDebug
 ```
 
-> 运行时快照（约 136MB）不入库，构建前需放到 `app/src/main/assets/snapshot.bin`，详见 `scripts/make-snapshot.sh` 与 `docs/design.md`。
+> 运行时快照（约 157MB）不入库，构建前需放到 `app/src/main/assets/snapshot.bin`，详见 `scripts/make-snapshot.sh` 与 `docs/design.md`。
 
 ## 下载
 
