@@ -107,10 +107,20 @@ class EngineManager(
         throw IOException("usr 切换失败")
       }
 
-      // home 骨架：仅首次安装（home/.dsh 不存在时），更新绝不覆盖用户数据。
+      // home 处理：
+      //  - profiles（dsh 配置 + 插件）以快照为准整体更新——升级 dsh 时必须更新，
+      //    否则旧插件配新 dsh 会装配失败；用户手动 patch 的 profile 需在新版上重打。
+      //  - 其余骨架仅补齐缺失项；用户数据（sessions/storages/凭据/settings）在
+      //    .dsh 下、不在 profiles 内，天然不受影响。
       homeDir.mkdirs()
       val stageHome = File(stage, RuntimeConfig.HOME_DIR)
-      if (stageHome.isDirectory && !File(homeDir, ".dsh").exists()) {
+      if (stageHome.isDirectory) {
+        val stageProfiles = File(stageHome, ".dsh/profiles")
+        if (stageProfiles.isDirectory) {
+          val destProfiles = File(homeDir, ".dsh/profiles")
+          destProfiles.deleteRecursively()
+          copyTree(stageProfiles, destProfiles)
+        }
         copyIfMissing(stageHome, homeDir)
       }
 
@@ -153,6 +163,28 @@ class EngineManager(
     } else if (!dst.exists()) {
       dst.parentFile?.mkdirs()
       src.copyTo(dst, overwrite = false)
+    }
+  }
+
+  /** 递归拷贝并覆盖目标（用于以快照为准整体替换 profiles）；符号链接按原样重建。 */
+  private fun copyTree(src: File, dst: File) {
+    val srcPath = src.toPath()
+    if (java.nio.file.Files.isSymbolicLink(srcPath)) {
+      dst.parentFile?.mkdirs()
+      java.nio.file.Files.deleteIfExists(dst.toPath())
+      java.nio.file.Files.createSymbolicLink(
+        dst.toPath(),
+        java.nio.file.Files.readSymbolicLink(srcPath),
+      )
+      return
+    }
+    if (src.isDirectory) {
+      dst.mkdirs()
+      src.listFiles()?.forEach { copyTree(it, File(dst, it.name)) }
+    } else {
+      dst.parentFile?.mkdirs()
+      java.nio.file.Files.deleteIfExists(dst.toPath())
+      src.copyTo(dst, overwrite = true)
     }
   }
 
