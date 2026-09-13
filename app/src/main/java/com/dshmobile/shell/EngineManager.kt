@@ -54,12 +54,53 @@ class EngineManager(
 
   private fun fingerprintFile(): File = File(context.filesDir, ".snapshot-fingerprint")
 
-  /** 快照是否已解压且与内嵌版本一致。 */
+  /**
+   * 快照完整性哨兵（assets/snapshot.sentinels）：跨归档均匀取样的一批文件路径。
+   * 用途是「证明解压确实覆盖了整个归档」——只比对指纹是不够的，因为指纹只是
+   * 一个我们写进去的声明值，不反映解压结果。
+   */
+  private val sentinels: List<String> by lazy {
+    try {
+      context.assets.open("snapshot.sentinels").bufferedReader().use { reader ->
+        reader.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+      }
+    } catch (_: Throwable) {
+      emptyList()
+    }
+  }
+
+  /**
+   * 运行树是否完整：逐个检查哨兵是否存在。
+   * 快照里存在悬空符号链接，所以「链接本身存在」也算命中，不跟随。
+   *
+   * @param root 检查根目录（filesDir 查线上树；stage 查待切换的暂存树）。
+   */
+  fun runtimeIntegrityOk(root: File = context.filesDir): Boolean {
+    if (sentinels.isEmpty()) return true // 无清单（旧构建）不做断言
+    for (relative in sentinels) {
+      val f = File(root, relative)
+      if (f.exists()) continue
+      if (java.nio.file.Files.isSymbolicLink(f.toPath())) continue
+      Log.w(TAG, "runtime integrity broken: missing " + relative)
+      return false
+    }
+    return true
+  }
+
+  /**
+   * 快照是否已解压且与内嵌版本一致，并且**解压结果完整**。
+   *
+   * 完整性这条是必需的：曾经出现过解压静默漏掉整个 `@deepseek-ai/dsh` 子树
+   * （29423 个条目）、但指纹照写的情况——此后 snapshotFresh() 永远为真，安装
+   * 再也不会重试，用户只看到无休止的「引擎启动超时」。这里返回 false 即触发
+   * 自动重装。
+   */
   fun snapshotFresh(): Boolean {
     if (!nodeBin.exists()) return false
     val fp = bundledFingerprint()
     if (fp.isEmpty()) return true // 无指纹（纯在线更新安装）不强制重解压
-    return fingerprintFile().exists() && fingerprintFile().readText().trim() == fp
+    if (!(fingerprintFile().exists() && fingerprintFile().readText().trim() == fp)) return false
+    return runtimeIntegrityOk()
   }
 
   /** 用内嵌资产快照安装运行时（首启或升级时调用）。 */
@@ -88,14 +129,27 @@ class EngineManager(
     newFingerprint: String,
     onProgress: (Long, Long) -> Unit,
   ): Boolean {
+    // 安装必须串行。Activity 重建/重试会再触发一次安装，而两次解压写的是同一个
+    // stage 目录：先完成的一方 deleteRecursively() 会删掉另一方还在写的文件，
+    // 最终拼出一棵「中间整段缺失」的树——正是之前 bash 全废、引擎秒退的成因。
+    if (!INSTALLING.compareAndSet(false, true)) {
+      Log.w(TAG, "install skipped: another install is already running")
+      return false
+    }
     val stage = File(context.filesDir, "update-stage")
-    stage.deleteRecursively()
-    return try {
-      SnapshotExtractor.extract(stream, totalBytes, stage, onProgress)
+    try {
+      stage.deleteRecursively()
+      val entries = SnapshotExtractor.extract(stream, totalBytes, stage, onProgress)
+      Log.i(TAG, "extracted $entries archive entries into stage")
 
       val stageUsr = File(stage, RuntimeConfig.USR_DIR)
       if (!File(stageUsr, RuntimeConfig.NODE_BIN.removePrefix("usr/")).exists()) {
         throw IOException("快照缺少 " + RuntimeConfig.NODE_BIN)
+      }
+      // 切换前先证明解压覆盖了整个归档：宁可保留旧运行时并报错，
+      // 也不要把一棵残缺的树换上线（残缺树会让引擎秒退、用户只看到超时）。
+      if (!runtimeIntegrityOk(stage)) {
+        throw IOException("快照解压不完整（见上面日志里缺失的路径），已保留旧运行时")
       }
 
       // 原子切换 usr。
@@ -108,6 +162,7 @@ class EngineManager(
         if (!usrDir.exists()) old.renameTo(usrDir) // 回滚
         throw IOException("usr 切换失败")
       }
+      Log.i(TAG, "usr swapped; engine entry present=" + dshBin.exists())
 
       // home 处理：
       //  - profiles（dsh 配置 + 插件）以快照为准整体更新——升级 dsh 时必须更新，
@@ -131,15 +186,18 @@ class EngineManager(
 
       stage.deleteRecursively()
       old.deleteRecursively()
+      Log.i(TAG, "cleanup done; engine entry present=" + dshBin.exists())
       if (newFingerprint.isNotEmpty()) fingerprintFile().writeText(newFingerprint)
       Log.i(TAG, "snapshot installed (fingerprint " + newFingerprint.take(12) + ")")
-      true
+      return true
     } catch (t: Throwable) {
       val old = File(context.filesDir, "usr-old")
       if (old.exists() && !usrDir.exists()) old.renameTo(usrDir) // 回滚
       stage.deleteRecursively()
       Log.e(TAG, "snapshot install failed; kept old runtime", t)
-      false
+      return false
+    } finally {
+      INSTALLING.set(false)
     }
   }
 
@@ -591,11 +649,43 @@ class EngineManager(
    */
   fun isEngineProcessAlive(): Boolean = engineProcess?.isAlive == true
 
+  /** 是否已经真的 spawn 过引擎进程（区别于「被 CAS/冷却窗口挡下」）。 */
+  fun hasEngineProcess(): Boolean = engineProcess != null
+
+  /**
+   * 从引擎日志里挑一行最能说明失败原因的文字，供 UI 直接展示。
+   * 优先级：显式错误行（Error:/Cannot find module/not executable…）→ 第一行非空内容。
+   */
+  fun engineLogSummary(): String? {
+    val lines = try {
+      val f = engineLogFile()
+      if (!f.exists()) return null
+      f.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+    } catch (_: Throwable) {
+      return null
+    }
+    if (lines.isEmpty()) return null
+    val errorLine = lines.firstOrNull { line ->
+      !line.startsWith("at ") && (
+        line.startsWith("Error") || line.contains("Cannot find module") ||
+          line.contains("not executable") || line.contains("Error:")
+        )
+    }
+    val picked = errorLine ?: lines.first()
+    return if (picked.length > 160) picked.take(160) + "…" else picked
+  }
+
   companion object {
     private const val TAG = "dsh-engine"
 
     /** 进程级启动 CAS：跨 EngineManager 实例可见（双启动竞态防护）。 */
     val STARTING = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * 进程级安装 CAS：快照解压必须串行。
+     * 并发安装会互相删对方正在写的 stage，产出一棵中间整段缺失的树。
+     */
+    val INSTALLING = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** 上次真实启动时刻（epoch ms）；看门狗冷却窗口基准。 */
     @Volatile

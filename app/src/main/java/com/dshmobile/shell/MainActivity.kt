@@ -662,6 +662,7 @@ class MainActivity : ComponentActivity() {
         }
         // 轮询直到 Web 服务应答（上限 BOOT_TIMEOUT_SEC）。
         val deadline = System.currentTimeMillis() + RuntimeConfig.BOOT_TIMEOUT_SEC * 1000
+        var deadTicks = 0
         while (System.currentTimeMillis() < deadline) {
           if (EngineProbe.isRunning()) {
             // 等 dsh web 打印本次启动的 launch token：首帧必须带 token 才能换取
@@ -670,6 +671,26 @@ class MainActivity : ComponentActivity() {
             startEngineService()
             runOnUiThread { showWeb() }
             return@Thread
+          }
+          // 进程已经退出就别干等到超时：直接把引擎日志里的真实错误摆出来。
+          // 之前的实现只会干等 45 秒再报「启动超时」，把 "Cannot find module"
+          // 这种一眼能看出的问题藏了起来。
+          if (engineManager.hasEngineProcess() && !engineManager.isEngineProcessAlive()) {
+            deadTicks++
+            if (deadTicks >= 3) {
+              val detail = engineManager.engineLogSummary()
+              runOnUiThread {
+                engineStatus.text = if (detail.isNullOrBlank()) {
+                  "引擎启动失败（进程已退出）。请点「重试」重新安装运行时。"
+                } else {
+                  "引擎启动失败：\n$detail\n请点「重试」重新安装运行时。"
+                }
+                showGuide()
+              }
+              return@Thread
+            }
+          } else {
+            deadTicks = 0
           }
           Thread.sleep(1000)
         }

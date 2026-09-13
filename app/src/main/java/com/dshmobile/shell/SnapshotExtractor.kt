@@ -25,13 +25,16 @@ object SnapshotExtractor {
    * @param totalBytes 预期大小（进度显示用；0 = 未知）。
    * @param dest 目标根目录（filesDir；归档内为 usr/ + home/）。
    * @param onProgress 回调（已解压字节, 总字节）。
+   * @return 实际处理的归档条目数（用于和清单比对、判断解压是否完整）。
    */
-  fun extract(input: InputStream, totalBytes: Long, dest: File, onProgress: (Long, Long) -> Unit) {
+  fun extract(input: InputStream, totalBytes: Long, dest: File, onProgress: (Long, Long) -> Unit): Int {
     val tar = TarArchiveInputStream(decompress(input))
     val execFiles = mutableListOf<String>()
     var done = 0L
+    var entries = 0
     var entry: TarArchiveEntry? = tar.nextTarEntry
     while (entry != null) {
+      entries++
       val target = File(dest, entry.name)
       when {
         entry.isDirectory -> target.mkdirs()
@@ -65,6 +68,7 @@ object SnapshotExtractor {
     }
     tar.close()
     stampExecAttribute(execFiles)
+    return entries
   }
 
   /** 对解压出的可执行文件打 security.android.exec 标记（内核不支持则静默忽略）。 */
